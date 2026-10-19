@@ -8,3 +8,6 @@ simple_auth_manager_passwords.json.generated
 *:Zone.Identifier
 data/cleaned_*.csv
 data/rejected_*.csv
+.venv/
+airflow.cfg
+webserver_config.py
