@@ -10,6 +10,7 @@ from airflow.sensors.filesystem import FileSensor
 from airflow.utils.trigger_rule import TriggerRule
 
 from utils import notify_failure
+from utils import bootstrap_schema
 
 logger = logging.getLogger(__name__)
 
@@ -67,19 +68,6 @@ def bank_settlement_sensor_pipeline():
         # Persist execution record in processed_settlement_files
         pg_hook = PostgresHook(postgres_conn_id="my_postgres_conn")
 
-        create_table_sql = """
-            CREATE TABLE IF NOT EXISTS processed_settlement_files (
-                id SERIAL PRIMARY KEY,
-                settlement_date DATE NOT NULL UNIQUE,
-                filepath VARCHAR(255) NOT NULL,
-                row_count INT NOT NULL,
-                processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_settlement_date
-            ON processed_settlement_files (settlement_date);
-        """
-
         upsert_settlement_sql = """
             INSERT INTO processed_settlement_files (settlement_date, filepath, row_count, processed_at)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -90,9 +78,11 @@ def bank_settlement_sensor_pipeline():
                 processed_at = CURRENT_TIMESTAMP
         """
 
+        # Guarantee entire production schema exists safely under advisory lock
+        bootstrap_schema("my_postgres_conn")
+
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(create_table_sql)
                 cursor.execute(upsert_settlement_sql, 
                                (settlement_date_str, filepath, data_row_count),
                 )

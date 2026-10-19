@@ -12,55 +12,10 @@ from airflow.models import Variable
 from airflow.utils.trigger_rule import TriggerRule
 
 from utils import notify_failure
+from utils import bootstrap_schema
 
 
 logger = logging.getLogger(__name__)
-
-# Centralized DDL Definitions
-CREATE_RAW_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS raw_exchange_rates (
-        id SERIAL PRIMARY KEY,
-        logical_date DATE NOT NULL,
-        fetched_at TIMESTAMP NOT NULL,
-        source_url VARCHAR(255) NOT NULL,
-        raw_response JSONB NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_raw_rates_logical_date
-    ON raw_exchange_rates (logical_date);
-"""
-
-CREATE_CLEAN_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS clean_exchange_rates (
-        id SERIAL PRIMARY KEY,
-        logical_date DATE NOT NULL,
-        currency_code VARCHAR(3) NOT NULL,
-        rate_to_usd NUMERIC(18, 6) NOT NULL,
-        source_raw_id INT NOT NULL REFERENCES raw_exchange_rates(id),
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT unique_date_currency UNIQUE(logical_date, currency_code)   
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_clean_rates_date
-    ON clean_exchange_rates (logical_date);
-"""
-
-CREATE_FLAGGED_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS flagged_exchange_rates (
-        id SERIAL PRIMARY KEY,
-        logical_date DATE NOT NULL,
-        currency_code VARCHAR(3) NOT NULL,
-        rate_to_usd NUMERIC(18, 6) NOT NULL,
-        previous_rate_to_usd NUMERIC(18, 6),
-        percentage_change NUMERIC(8, 4),
-        source_raw_id INT NOT NULL REFERENCES raw_exchange_rates(id),
-        flagged_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT unique_flagged_date_currency UNIQUE(logical_date, currency_code)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_flagged_rates_date
-    ON flagged_exchange_rates (logical_date);
-"""
 
 @dag(
     dag_id="exchange_rates_etl_pipeline",
@@ -161,9 +116,11 @@ def exchange_rates_etl_pipeline():
             json.dumps(raw_json_data),
         )
 
+        # Guarantee entire table schema exists safely under advisory lock
+        bootstrap_schema("my_postgres_conn")
+
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(CREATE_RAW_TABLE_SQL)
                 cursor.execute(insert_raw_sql, values,)
                 inserted_id = cursor.fetchone()[0]
                 conn.commit()
@@ -298,7 +255,6 @@ def exchange_rates_etl_pipeline():
         yesterday_rates = {}
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(CREATE_CLEAN_TABLE_SQL)
                 cursor.execute(baseline_sql, (yesterday_str,))
                 rows = cursor.fetchall()
                 for currency_code, rate in rows:
@@ -410,7 +366,6 @@ def exchange_rates_etl_pipeline():
 
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(CREATE_CLEAN_TABLE_SQL)
                 execute_values(cursor, upsert_sql, records_to_insert)
                 conn.commit()
 
@@ -470,7 +425,6 @@ def exchange_rates_etl_pipeline():
 
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(CREATE_FLAGGED_TABLE_SQL)
                 execute_values(cursor, upsert_flagged_sql, records_to_insert)
                 conn.commit()
 

@@ -11,6 +11,8 @@ from airflow.operators.python import get_current_context
 from airflow.models import Variable
 from psycopg2.extras import execute_values
 
+from utils import bootstrap_schema
+
 logger = logging.getLogger(__name__)
 
 # define dag using DAG decorator
@@ -161,23 +163,16 @@ def signups_etl_pipeline():
 
         prod_table = "customer_signups"
         staging_table = f"staging_{prod_table}_{cleaned_run_id}"
+
+        # Guarantee entire production tables exists safely under advisory lock
+        bootstrap_schema("my_postgres_conn")
                 
         # Initialize the hook
         pg_hook = PostgresHook(postgres_conn_id="my_postgres_conn")
 
-        # create production table and staging table as an empty clone of production. 
+        # create staging table as an empty clone of production. 
         # so it inherits the exact datatypes perfectly.
-        create_tables_sql = f"""
-            CREATE TABLE IF NOT EXISTS {prod_table} (
-                signup_id VARCHAR(50) PRIMARY KEY,
-                full_name VARCHAR(255),
-                email VARCHAR(255),
-                phone_number VARCHAR(50),
-                signup_date DATE,
-                referral_source VARCHAR(100),
-                plan_type VARCHAR(50)
-            );
-
+        create_staging_sql = f"""
             CREATE TABLE IF NOT EXISTS {staging_table}
             (LIKE {prod_table} INCLUDING ALL);
 
@@ -232,7 +227,7 @@ def signups_etl_pipeline():
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cursor:
                 logger.info("Initializing unique staging table '%s'...", staging_table)
-                cursor.execute(create_tables_sql)
+                cursor.execute(create_staging_sql)
                 conn.commit()
 
         try:
