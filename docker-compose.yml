@@ -1,0 +1,132 @@
+# ==============================================================================
+# 1. SHARED CONFIGURATION ANCHOR FOR AIRFLOW SERVICES
+# ==============================================================================
+x-airflow-common: &airflow-common
+  image: paynaija-airflow:2.9.1
+  restart: unless-stopped
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    # Executor & Metadata connection
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:?Set AIRFLOW_DB_PASSWORD in .env}@airflow-db:5432/${AIRFLOW_DB_NAME:-airflow}
+    
+    # Pre-configure the business warehouse connection for all DAG tasks
+    AIRFLOW_CONN_MY_POSTGRES_CONN: postgresql://${WAREHOUSE_USER:-paynaija_user}:${WAREHOUSE_PASSWORD:?Set WAREHOUSE_PASSWORD in .env}@paynaija-warehouse:5432/${WAREHOUSE_DB:-paynaija_dev}
+    
+    # FileSystem Connection for FileSensor
+    AIRFLOW_CONN_FS_DEFAULT: "fs://"
+
+    # Encryption and session keys
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?Set AIRFLOW__CORE__FERNET_KEY in .env}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:?Set AIRFLOW__WEBSERVER__SECRET_KEY in .env}
+
+    # UI handling
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+
+    # Volume path mappings
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+
+    # Airflow Auto-Mapped Variables
+    AIRFLOW_VAR_ANOMALY_THRESHOLD_PERCENTAGE: ${AIRFLOW_VAR_ANOMALY_THRESHOLD_PERCENTAGE}
+    AIRFLOW_VAR_EXCHANGE_RATE_API_URL: ${AIRFLOW_VAR_EXCHANGE_RATE_API_URL}
+    AIRFLOW_VAR_REQUIRED_CURRENCIES: ${AIRFLOW_VAR_REQUIRED_CURRENCIES}
+    AIRFLOW_VAR_SETTLEMENT_FILE_DIR: ${AIRFLOW_VAR_SETTLEMENT_FILE_DIR}
+    AIRFLOW_VAR_SIGNUPS_INPUT_PATH: ${AIRFLOW_VAR_SIGNUPS_INPUT_PATH}
+    AIRFLOW_VAR_SIGNUPS_CLEAN_PATH: ${AIRFLOW_VAR_SIGNUPS_CLEAN_PATH}
+    AIRFLOW_VAR_SIGNUPS_REJECTED_PATH: ${AIRFLOW_VAR_SIGNUPS_REJECTED_PATH}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+  depends_on:
+    airflow-init:
+      condition: service_completed_successfully
+    paynaija-warehouse:
+      condition: service_healthy
+
+# ==============================================================================
+# 2. SERVICES
+# ==============================================================================
+services:
+  # Metadata Database (Internal only, no host port exposed)
+  airflow-db:
+    image: postgres:16-alpine
+    container_name: paynaija-airflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?Set AIRFLOW_DB_PASSWORD in .env}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+    volumes:
+      - airflow-metadata-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER:-airflow} -d ${AIRFLOW_DB_NAME:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # PayNaija Business Data Warehouse (Exposed exclusively on localhost)
+  paynaija-warehouse:
+    image: postgres:16-alpine
+    container_name: paynaija-warehouse
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_USER:-paynaija_user}
+      POSTGRES_PASSWORD: ${WAREHOUSE_PASSWORD:?Set WAREHOUSE_PASSWORD in .env}
+      POSTGRES_DB: ${WAREHOUSE_DB:-paynaija_dev}
+    volumes:
+      - warehouse-data-volume:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WAREHOUSE_USER:-paynaija_user} -d ${WAREHOUSE_DB:-paynaija_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Initialization Service (Owns image build, runs migrations, creates admin user)
+  airflow-init:
+    build: .
+    image: paynaija-airflow:2.9.1
+    container_name: paynaija-airflow-init
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:?Set AIRFLOW_DB_PASSWORD in .env}@airflow-db:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?Set AIRFLOW__CORE__FERNET_KEY in .env}
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_PASSWORD:?Set AIRFLOW_WWW_PASSWORD in .env}
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    command: version
+
+
+  # Webserver (Bound exclusively to localhost loopback)
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: paynaija-airflow-webserver
+    command: webserver
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  # Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: paynaija-airflow-scheduler
+    command: scheduler
+
+  # Triggerer (Enables deferrable operators and future event listeners)
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: paynaija-airflow-triggerer
+    command: triggerer
+
+volumes:
+  airflow-metadata-volume:
+  warehouse-data-volume:
